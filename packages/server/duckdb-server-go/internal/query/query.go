@@ -278,7 +278,7 @@ func (db *DB) QueryArrow(ctx context.Context, query string, allowedSchemas []str
 	var data []byte
 
 	if useCache && db.cache != nil {
-		key, data = db.cacheGet("j", query)
+		key, data = db.cacheGet("a", query)
 		if data != nil {
 			return data, true, nil
 		}

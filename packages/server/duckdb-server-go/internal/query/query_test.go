@@ -1,12 +1,14 @@
 package query
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"testing"
 
+	"github.com/apache/arrow-go/v18/arrow/ipc"
 	"github.com/duckdb/duckdb-go/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -170,5 +172,66 @@ func TestDB_QueryArrow(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, want, got)
 		assert.True(t, fromCache)
+	})
+}
+
+// TestDB_CacheFormatIsolation ensures the JSON and Arrow caches do not collide.
+// The same SQL is cached separately per output format, so requesting one format
+// must never return a cache hit filled by the other format.
+func TestDB_CacheFormatIsolation(t *testing.T) {
+	const query = "SELECT * FROM readings ORDER BY id"
+
+	setup := func(db *DB) {
+		ctx := context.Background()
+		require.NoError(t, db.Exec(ctx, "CREATE TABLE readings (id INTEGER, value DOUBLE)"))
+		require.NoError(t, db.Exec(ctx, "INSERT INTO readings VALUES (1, 1.5), (2, 2.5)"))
+	}
+
+	// isValidArrow reports whether data is a decodable Arrow IPC stream.
+	isValidArrow := func(data []byte) bool {
+		r, err := ipc.NewReader(bytes.NewReader(data))
+		if err != nil {
+			return false
+		}
+		r.Release()
+		return true
+	}
+
+	t.Run("json cached first does not poison arrow", func(t *testing.T) {
+		db := setupTestDB(t)
+		setup(db)
+		ctx := context.Background()
+
+		// Fill the JSON cache entry for the query.
+		jsonBytes, fromCache, err := db.QueryJSON(ctx, query, nil, true)
+		require.NoError(t, err)
+		assert.False(t, fromCache)
+		assert.True(t, json.Valid(jsonBytes), "expected valid JSON")
+
+		// Same SQL as Arrow must be a cache miss, not the cached JSON bytes.
+		arrowBytes, fromCache, err := db.QueryArrow(ctx, query, nil, true)
+		require.NoError(t, err)
+		assert.False(t, fromCache, "arrow request must not hit the JSON cache entry")
+		assert.NotEqual(t, jsonBytes, arrowBytes, "arrow must not return the cached JSON bytes")
+		assert.True(t, isValidArrow(arrowBytes), "expected valid Arrow IPC bytes")
+	})
+
+	t.Run("arrow cached first does not poison json", func(t *testing.T) {
+		db := setupTestDB(t)
+		setup(db)
+		ctx := context.Background()
+
+		// Fill the Arrow cache entry for the query.
+		arrowBytes, fromCache, err := db.QueryArrow(ctx, query, nil, true)
+		require.NoError(t, err)
+		assert.False(t, fromCache)
+		assert.True(t, isValidArrow(arrowBytes), "expected valid Arrow IPC bytes")
+
+		// Same SQL as JSON must be a cache miss, not the cached Arrow bytes.
+		jsonBytes, fromCache, err := db.QueryJSON(ctx, query, nil, true)
+		require.NoError(t, err)
+		assert.False(t, fromCache, "json request must not hit the Arrow cache entry")
+		assert.NotEqual(t, arrowBytes, []byte(jsonBytes), "json must not return the cached Arrow bytes")
+		assert.True(t, json.Valid(jsonBytes), "expected valid JSON")
 	})
 }
