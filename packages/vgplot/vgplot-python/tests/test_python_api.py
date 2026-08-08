@@ -1,5 +1,7 @@
 # Unit tests for the vgplot Python API, covering behaviors that the
 # generated-spec round-trip suite does not exercise directly.
+import ast
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -103,6 +105,56 @@ class TestDataFrames:
         assert d["plot"][1]["data"] == {"from": "athletes"}
         assert d["data"]["weather"] is weather
         assert d["data"]["athletes"] == {"type": "csv", "file": "athletes.csv"}
+
+
+class TestDiscriminatedMarks:
+    """densityX and densityY render as one of several base marks, selected by
+    `type`, and each choice brings its own option set. The generator emits one
+    @overload per branch so a type checker can reject options from a different
+    branch; merging the branches into a single signature would accept any
+    mixture. Parsed from the generated source because typing.get_overloads()
+    needs Python 3.11 and this package supports 3.10."""
+
+    @staticmethod
+    def _overloads(name: str) -> list[dict[str, ast.arg]]:
+        from vgplot._generated import marks
+
+        tree = ast.parse(Path(marks.__file__).read_text("utf-8"))
+        out = []
+        for node in tree.body:
+            if not isinstance(node, ast.FunctionDef) or node.name != name:
+                continue
+            if any(
+                getattr(d, "id", "") == "overload" for d in node.decorator_list
+            ):
+                out.append({a.arg: a for a in node.args.kwonlyargs})
+        return out
+
+    @pytest.mark.parametrize(("name", "count"), [("density_x", 4), ("density_y", 4)])
+    def test_one_overload_per_branch(self, name, count):
+        assert len(self._overloads(name)) == count
+
+    def test_branch_options_do_not_leak_across_branches(self):
+        by_type = {}
+        for sig in self._overloads("density_x"):
+            literal = ast.unparse(sig["type_"].annotation)
+            by_type[literal] = set(sig)
+
+        area = next(v for k, v in by_type.items() if "areaX" in k)
+        dot = next(v for k, v in by_type.items() if "dotX" in k)
+
+        # curve is an area/line option; symbol is a dot option
+        assert "curve" in area and "curve" not in dot
+        assert "symbol" in dot and "symbol" not in area
+
+    def test_optional_discriminator_branch_is_last(self):
+        # densityY's areaY branch leaves `type` optional, so it must come last;
+        # otherwise a call that omits `type` could not resolve to the default.
+        annotations = [
+            ast.unparse(sig["type_"].annotation) for sig in self._overloads("density_y")
+        ]
+        optional = [i for i, a in enumerate(annotations) if "UNSET" in a]
+        assert optional == [len(annotations) - 1], annotations
 
 
 if TYPE_CHECKING:

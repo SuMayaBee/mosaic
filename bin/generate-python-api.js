@@ -48,6 +48,44 @@ function isBooleanAttr(def) {
   return opts.some(o => o.type === 'boolean');
 }
 
+/** The literal values a schema property is pinned to, or null if it is open. */
+function literalValues(prop) {
+  if (!prop) return null;
+  if (prop.const !== undefined) return [prop.const];
+  if (Array.isArray(prop.enum)) return prop.enum;
+  return null;
+}
+
+/**
+ * Find the discriminator of a union of branches: a property pinned to literal
+ * values in every branch, with no value shared between branches (e.g. `type`
+ * on densityX, which selects the base mark and with it the legal option set).
+ * Returns { key, variants: [{ values, required, props }] } or null.
+ */
+function discriminator(branches) {
+  if (branches.length < 2) return null;
+  const candidates = Object.keys(branches[0].properties ?? {})
+    .filter(k => k !== 'mark' && k !== 'data');
+
+  for (const key of candidates) {
+    const perBranch = branches.map(b => literalValues(b.properties?.[key]));
+    if (perBranch.some(v => v === null)) continue;
+    const seen = new Set();
+    const disjoint = perBranch.every(vals =>
+      vals.every(v => !seen.has(v) && seen.add(v)));
+    if (!disjoint) continue;
+    return {
+      key,
+      variants: branches.map((b, i) => ({
+        values: perBranch[i],
+        required: (b.required ?? []).includes(key),
+        props: b.properties ?? {}
+      }))
+    };
+  }
+  return null;
+}
+
 /** Extract a mark's const name and unioned channel properties from a def,
  * handling both flat defs and `anyOf`/`allOf` intersection defs (e.g. densityX). */
 function markInfo(def) {
@@ -59,12 +97,20 @@ function markInfo(def) {
   const branches = def.anyOf || def.allOf || [];
   const consts = new Set();
   const props = {};
+  const matched = [];
   for (const b of branches) {
     const c = b.properties?.mark?.const;
-    if (c) { consts.add(c); Object.assign(props, b.properties); }
+    if (c) { consts.add(c); matched.push(b); Object.assign(props, b.properties); }
   }
   if (consts.size !== 1) return null;
-  return { mark: [...consts][0], props, description: def.description };
+  // The union above is what the implementation signature accepts. Keep the
+  // branches too, so each can be surfaced as its own overload.
+  return {
+    mark: [...consts][0],
+    props,
+    description: def.description,
+    discriminator: discriminator(matched)
+  };
 }
 
 function generateMarks(defs) {
@@ -75,7 +121,8 @@ function generateMarks(defs) {
   }
   marks.sort((a, b) => a.mark.localeCompare(b.mark));
 
-  const out = [HEADER, 'from typing import Any', '', 'from .._types import UNSET, ChannelValue, MarkData',
+  const out = [HEADER, 'from typing import Any, Literal, overload', '',
+    'from .._types import UNSET, ChannelValue, MarkData',
     'from ..plot import Mark', '', '',
     'def _mark(name: str, args: dict[str, Any]) -> Mark:',
     '    args = dict(args)',
@@ -86,15 +133,43 @@ function generateMarks(defs) {
     '    return Mark(name, data=data, enc=enc or None)',
     '', ''];
   const names = [];
-  for (const { mark, props: propsObj, description } of marks) {
+  for (const { mark, props: propsObj, description, discriminator: disc } of marks) {
     const fn = ident(mark);
     names.push(fn);
     // Channel/option properties: everything except the `mark` const, `data`,
     // and any non-identifier keys (e.g. a stray `$schema`).
-    const props = Object.keys(propsObj)
+    const optionKeys = obj => Object.keys(obj)
       .filter(p => p !== 'mark' && p !== 'data' && /^[A-Za-z][A-Za-z0-9]*$/.test(p));
+    const props = optionKeys(propsObj);
     const params = props.map(p => `    ${ident(p)}: ChannelValue | UNSET = UNSET,`);
     const doc = docline(description, `The ${mark} mark.`);
+
+    // A discriminated union (e.g. densityX, which renders as an areaX, lineX,
+    // dotX, or textX mark) gets one overload per branch, so a type checker can
+    // reject options belonging to a different branch. Without them the branches
+    // collapse into a single signature that accepts any mixture.
+    if (disc) {
+      // Branches that leave the discriminator optional must come last, so a
+      // call that omits it still resolves to the default branch.
+      const ordered = [...disc.variants].sort((a, b) => b.required - a.required);
+      for (const v of ordered) {
+        const lit = `Literal[${v.values.map(x => JSON.stringify(x)).join(', ')}]`;
+        const tail = v.required ? '' : ' | UNSET = UNSET';
+        out.push(
+          '@overload',
+          `def ${fn}(`,
+          '    data: MarkData = None,',
+          '    *,',
+          `    ${ident(disc.key)}: ${lit}${tail},`,
+          ...optionKeys(v.props)
+            .filter(p => p !== disc.key)
+            .map(p => `    ${ident(p)}: ChannelValue | UNSET = UNSET,`),
+          ') -> Mark: ...',
+          '', '',
+        );
+      }
+    }
+
     out.push(
       `def ${fn}(`,
       '    data: MarkData = None,',
