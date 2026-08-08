@@ -127,10 +127,25 @@ export type DensityX = DensityXBase & (
 );
 ```
 
-with a `type: 'areaX' | 'lineX' | 'dotX' | 'textX'` discriminator. JSON Schema
-cannot keep the correlation between the discriminator and the option set, so
-the shipped generator unions all four branches into one signature. The result
-accepts specs the TypeScript API rejects:
+with a `type: 'areaX' | 'lineX' | 'dotX' | 'textX'` discriminator.
+
+The JSON schema *does* preserve this. `DensityX` is emitted as four `anyOf`
+branches, each carrying a `type` const and its own property set (the `areaX`
+branch has `curve` and no `symbol`; the `dotX` branch has `symbol` and no
+`curve`). The correlation survives the schema step.
+
+It is lost one step later, in `bin/generate-python-api.js`. `markInfo()` merges
+the branches:
+
+```js
+for (const b of branches) {
+  const c = b.properties?.mark?.const;
+  if (c) { consts.add(c); Object.assign(props, b.properties); }  // <- merge
+}
+```
+
+so the four option sets collapse into one signature. The result accepts specs
+the TypeScript API rejects:
 
 ```python
 density_x(type_="dotX", curve="linear")     # curve is an areaX/lineX option
@@ -140,6 +155,10 @@ density_x(type_="areaX", symbol="circle")   # symbol is a dotX option
 The shipped `density_x` accepts both. Python expresses this correctly with
 `@overload` keyed on the discriminator, and both calls are then rejected. See
 `checks/check_overloads.py`.
+
+Unlike the inheritance loss, this one does not need a new pipeline: the
+information is present in the schema and could be recovered by emitting
+overloads from the `anyOf` branches in the existing generator.
 
 ## Where the approach needed target-specific rules
 
