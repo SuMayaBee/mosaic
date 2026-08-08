@@ -19,6 +19,16 @@ describe('JSON schema', () => {
   it('is a valid JSON schema', () => {
     expect(validator.validateSchema(schema)).toBe(true);
   });
+
+  // The circle and hexagon marks set `symbol` themselves, so the option must
+  // not be exposed. Removing it needs `Omit`; `Exclude` filters union members
+  // and silently leaves object properties in place.
+  it('omits the symbol option from circle and hexagon', () => {
+    const defs = schema.definitions ?? schema.$defs;
+    expect(defs.Dot.properties).toHaveProperty('symbol');
+    expect(defs.Circle.properties).not.toHaveProperty('symbol');
+    expect(defs.Hexagon.properties).not.toHaveProperty('symbol');
+  });
 });
 
 // validate specs, parsing, and generation

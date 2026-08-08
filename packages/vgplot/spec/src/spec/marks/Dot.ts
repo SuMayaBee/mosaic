@@ -140,13 +140,13 @@ export interface DotY extends MarkData, DotYOptions {
 }
 
 /** The circle mark. */
-export interface Circle extends MarkData, Exclude<DotOptions, 'symbol'> {
+export interface Circle extends MarkData, Omit<DotOptions, 'symbol'> {
   /** Like dot, except that the **symbol** option is set to *circle*. */
   mark: 'circle';
 }
 
 /** The hexagon mark. */
-export interface Hexagon extends MarkData, Exclude<DotOptions, 'symbol'> {
+export interface Hexagon extends MarkData, Omit<DotOptions, 'symbol'> {
   /** Like dot, except that the **symbol** option is set to *hexagon*. */
   mark: 'hexagon';
 }
